@@ -34,6 +34,11 @@ from .prompts.table_summary_prompt import TABLE_SUMMARY_PROMPT
 from .prompts.text_to_sql_prompt import TEXT_TO_SQL_PROMPT
 from .prompts.sql_complete_prompt import SQL_AUTOCOMPLETE_PROMPT
 from .prompts.data_doc_title_prompt import DATA_DOC_TITLE_PROMPT
+from .query_complexity import (
+    SchemaDepth,
+    estimate_query_complexity,
+    select_schema_depth,
+)
 from .tools.table_schema import (
     get_slimmed_table_schemas,
     get_table_schema_by_name,
@@ -114,16 +119,28 @@ class BaseAIAssistant(ABC):
     def _get_text_to_sql_prompt(self, dialect, question, table_schemas, original_query):
         context_limit = self._get_usable_token_count(AICommandType.TEXT_TO_SQL.value)
         prompt_template = SQL_EDIT_PROMPT if original_query else TEXT_TO_SQL_PROMPT
+
+        # Estimate step: pick the minimum-sufficient schema depth from the
+        # question's complexity before rendering, instead of always starting
+        # from the full (maximum-context-first) schemas and trimming reactively.
+        schema_depth = select_schema_depth(estimate_query_complexity(question))
+        effective_schemas = (
+            get_slimmed_table_schemas(table_schemas)
+            if schema_depth is SchemaDepth.SLIMMED
+            else table_schemas
+        )
+
         prompt = prompt_template.format(
             dialect=dialect,
             question=question,
-            table_schemas=table_schemas,
+            table_schemas=effective_schemas,
             original_query=original_query,
         )
         token_count = self._get_token_count(AICommandType.TEXT_TO_SQL.value, prompt)
 
-        if token_count > context_limit:
-            # if the prompt is too long, use slimmed table schemas
+        # Expand step: if the estimated-minimum prompt still exceeds the
+        # context budget, fall back to the slimmed schemas.
+        if token_count > context_limit and schema_depth is not SchemaDepth.SLIMMED:
             prompt = prompt_template.format(
                 dialect=dialect,
                 question=question,
@@ -131,7 +148,6 @@ class BaseAIAssistant(ABC):
                 original_query=original_query,
             )
 
-        # TODO: need a better way to handle it if the prompt is still too long
         return prompt
 
     def _get_sql_fix_prompt(self, dialect, query, error, table_schemas):
