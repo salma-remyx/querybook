@@ -34,6 +34,10 @@ from .prompts.table_summary_prompt import TABLE_SUMMARY_PROMPT
 from .prompts.text_to_sql_prompt import TEXT_TO_SQL_PROMPT
 from .prompts.sql_complete_prompt import SQL_AUTOCOMPLETE_PROMPT
 from .prompts.data_doc_title_prompt import DATA_DOC_TITLE_PROMPT
+from .sql_demonstrations import (
+    DEMONSTRATION_TOKEN_BUDGET_FRACTION,
+    select_and_format_sql_demonstrations,
+)
 from .tools.table_schema import (
     get_slimmed_table_schemas,
     get_table_schema_by_name,
@@ -111,7 +115,9 @@ class BaseAIAssistant(ABC):
     def _get_sql_title_prompt(self, query):
         return SQL_TITLE_PROMPT.format(query=query)
 
-    def _get_text_to_sql_prompt(self, dialect, question, table_schemas, original_query):
+    def _get_text_to_sql_prompt(
+        self, dialect, question, table_schemas, original_query, demonstrations=""
+    ):
         context_limit = self._get_usable_token_count(AICommandType.TEXT_TO_SQL.value)
         prompt_template = SQL_EDIT_PROMPT if original_query else TEXT_TO_SQL_PROMPT
         prompt = prompt_template.format(
@@ -119,6 +125,7 @@ class BaseAIAssistant(ABC):
             question=question,
             table_schemas=table_schemas,
             original_query=original_query,
+            demonstrations=demonstrations,
         )
         token_count = self._get_token_count(AICommandType.TEXT_TO_SQL.value, prompt)
 
@@ -129,10 +136,40 @@ class BaseAIAssistant(ABC):
                 question=question,
                 table_schemas=get_slimmed_table_schemas(table_schemas),
                 original_query=original_query,
+                demonstrations=demonstrations,
             )
 
         # TODO: need a better way to handle it if the prompt is still too long
         return prompt
+
+    def _get_text_to_sql_demonstrations(self, question, tables):
+        """Retrieve selective in-domain (question -> SQL) demonstrations.
+
+        Adapted from ODIS (arXiv:2310.06302): demonstrations are selected by
+        question similarity via the vector store and trimmed to a fraction of
+        the usable token window. Returns a rendered prompt section, or "" to
+        fall back to the zero-shot prompt when retrieval is unavailable.
+        """
+        try:
+            context_limit = self._get_usable_token_count(
+                AICommandType.TEXT_TO_SQL.value
+            )
+            budget = int(context_limit * DEMONSTRATION_TOKEN_BUDGET_FRACTION)
+            command = AICommandType.TEXT_TO_SQL.value
+            token_counter = functools.partial(self._get_token_count, command)
+            return select_and_format_sql_demonstrations(
+                question=question,
+                tables=tables,
+                token_counter=token_counter,
+                token_budget=budget,
+            )
+        except Exception:
+            LOG.error(
+                "Failed to retrieve SQL demonstrations; "
+                "falling back to zero-shot text-to-sql.",
+                exc_info=True,
+            )
+            return ""
 
     def _get_sql_fix_prompt(self, dialect, query, error, table_schemas):
         return SQL_FIX_PROMPT.format(
@@ -281,11 +318,16 @@ class BaseAIAssistant(ABC):
             should_skip_column=self._should_skip_column,
             session=session,
         )
+        demonstrations = self._get_text_to_sql_demonstrations(
+            question=question,
+            tables=tables,
+        )
         prompt = self._get_text_to_sql_prompt(
             dialect=query_engine.language,
             question=question,
             table_schemas=table_schemas,
             original_query=original_query,
+            demonstrations=demonstrations,
         )
         llm = self._get_llm(
             ai_command=AICommandType.TEXT_TO_SQL.value,

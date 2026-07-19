@@ -9,7 +9,7 @@ Please help to generate a {dialect} query to answer the question. Your response 
 ===Tables
 {table_schemas}
 
-===Original Query
+{demonstrations}===Original Query
 {original_query}
 
 ===Response Guidelines

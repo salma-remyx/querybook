@@ -8,7 +8,7 @@ Please help to modify the original {dialect} query to answer the question. Your 
 ===Tables
 {table_schemas}
 
-===Original Query
+{demonstrations}===Original Query
 {original_query}
 
 ===Response Guidelines
