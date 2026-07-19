@@ -34,6 +34,7 @@ from .prompts.table_summary_prompt import TABLE_SUMMARY_PROMPT
 from .prompts.text_to_sql_prompt import TEXT_TO_SQL_PROMPT
 from .prompts.sql_complete_prompt import SQL_AUTOCOMPLETE_PROMPT
 from .prompts.data_doc_title_prompt import DATA_DOC_TITLE_PROMPT
+from .sql_verifier import SQLVerifier, SQLVerificationResult
 from .tools.table_schema import (
     get_slimmed_table_schemas,
     get_table_schema_by_name,
@@ -561,6 +562,40 @@ class BaseAIAssistant(ABC):
         response = chain.invoke(prompt)
         socket.send_data(response)
         socket.close()
+
+    @catch_error
+    def verify_generated_sql(
+        self,
+        dialect: str,
+        table_schemas,
+        question: str,
+        generated_query: str,
+        llm: Optional[BaseLanguageModel] = None,
+        criteria=None,
+        n_samples: int = 1,
+    ) -> SQLVerificationResult:
+        """Verify a generated SQL query with continuous LLM-as-a-Verifier scoring.
+
+        Scores the query per criterion by taking the expectation over the
+        distribution of scoring-token logits (a continuous, calibrated score)
+        rather than a single discrete judge token, then aggregates the
+        per-criterion scores. Pass ``llm`` to inject a logprobs-enabled model
+        (defaults to the TEXT_TO_SQL model).
+
+        Adapted from "LLM-as-a-Verifier" (arXiv:2607.05391).
+        """
+        if llm is None:
+            llm = self._get_llm(
+                ai_command=AICommandType.TEXT_TO_SQL.value,
+                prompt_length=0,
+            )
+        return SQLVerifier(llm=llm, criteria=criteria).verify(
+            dialect=dialect,
+            question=question,
+            table_schemas=table_schemas,
+            generated_query=generated_query,
+            n_samples=n_samples,
+        )
 
     @catch_error
     @with_ai_socket(command_type=AICommandType.DATA_DOC_TITLE)
