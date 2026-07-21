@@ -34,6 +34,10 @@ from .prompts.table_summary_prompt import TABLE_SUMMARY_PROMPT
 from .prompts.text_to_sql_prompt import TEXT_TO_SQL_PROMPT
 from .prompts.sql_complete_prompt import SQL_AUTOCOMPLETE_PROMPT
 from .prompts.data_doc_title_prompt import DATA_DOC_TITLE_PROMPT
+from .tools.schema_linking import (
+    format_schema_linking_prompt,
+    link_and_prune_schemas,
+)
 from .tools.table_schema import (
     get_slimmed_table_schemas,
     get_table_schema_by_name,
@@ -113,6 +117,12 @@ class BaseAIAssistant(ABC):
 
     def _get_text_to_sql_prompt(self, dialect, question, table_schemas, original_query):
         context_limit = self._get_usable_token_count(AICommandType.TEXT_TO_SQL.value)
+        # Soft schema linking (adapted from MAG-SQL): prune each table's
+        # columns to those the model deems relevant to the question before the
+        # text-to-SQL prompt is built. Falls back to the full schema on failure.
+        table_schemas = self._soft_link_table_schemas(
+            question=question, table_schemas=table_schemas
+        )
         prompt_template = SQL_EDIT_PROMPT if original_query else TEXT_TO_SQL_PROMPT
         prompt = prompt_template.format(
             dialect=dialect,
@@ -133,6 +143,36 @@ class BaseAIAssistant(ABC):
 
         # TODO: need a better way to handle it if the prompt is still too long
         return prompt
+
+    def _soft_link_table_schemas(self, *, question, table_schemas):
+        """Prune table schemas to question-relevant columns via soft schema linking.
+
+        Adapted from MAG-SQL's Soft_Schema_linker. Returns the original
+        schemas unchanged when there is nothing to link or when the linking
+        call fails, so the text-to-SQL flow never regresses.
+        """
+        if not question or not table_schemas:
+            return table_schemas
+
+        try:
+            prompt = format_schema_linking_prompt(question, table_schemas)
+            llm = self._get_llm(
+                ai_command=AICommandType.TEXT_TO_SQL.value,
+                prompt_length=self._get_token_count(
+                    AICommandType.TEXT_TO_SQL.value, prompt
+                ),
+            )
+            chain = llm | JsonOutputParser()
+            return link_and_prune_schemas(
+                invoke=chain.invoke,
+                question=question,
+                table_schemas=table_schemas,
+            )
+        except Exception as e:
+            LOG.warning(
+                "Soft schema linking failed, falling back to full schema: %s", e
+            )
+            return table_schemas
 
     def _get_sql_fix_prompt(self, dialect, query, error, table_schemas):
         return SQL_FIX_PROMPT.format(
