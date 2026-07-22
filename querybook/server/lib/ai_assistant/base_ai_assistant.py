@@ -34,6 +34,7 @@ from .prompts.table_summary_prompt import TABLE_SUMMARY_PROMPT
 from .prompts.text_to_sql_prompt import TEXT_TO_SQL_PROMPT
 from .prompts.sql_complete_prompt import SQL_AUTOCOMPLETE_PROMPT
 from .prompts.data_doc_title_prompt import DATA_DOC_TITLE_PROMPT
+from .sql_candidate_critique import critique_and_select
 from .tools.table_schema import (
     get_slimmed_table_schemas,
     get_table_schema_by_name,
@@ -294,12 +295,65 @@ class BaseAIAssistant(ABC):
             ),
         )
 
+        sample_count = (
+            self._config.get(AICommandType.TEXT_TO_SQL.value, {})
+            .get("model_args", {})
+            .get("sample_count", 1)
+        )
+        if sample_count and sample_count > 1:
+            self._run_multisample_sql_critique(
+                socket=socket,
+                llm=llm,
+                prompt_text=prompt,
+                sample_count=sample_count,
+                table_schemas=table_schemas,
+                question=question,
+                dialect=query_engine.language,
+            )
+            return
+
         self._run_prompt_and_send(
             socket=socket,
             command=AICommandType.TEXT_TO_SQL,
             llm=llm,
             prompt_text=prompt,
         )
+
+    def _run_multisample_sql_critique(
+        self,
+        *,
+        socket: AIWebSocket,
+        llm: BaseLanguageModel,
+        prompt_text: str,
+        sample_count: int,
+        table_schemas,
+        question: str,
+        dialect: Optional[str],
+    ):
+        """Sample N candidate SQLs and stream the best-scoring one.
+
+        Adapts MSc-SQL multi-sample critiquing via ``sql_candidate_critique``:
+        keep the best candidate by a parameter-free, metadata-grounded critique
+        (no learned critic). Non-streaming -- the selected candidate is sent once.
+        """
+        chain = llm | JsonOutputParser()
+        best = critique_and_select(
+            lambda: chain.invoke(prompt_text),
+            sample_count=sample_count,
+            table_schemas=table_schemas,
+            question=question,
+            dialect=dialect,
+            on_sample_error=lambda exc: LOG.warning(
+                "text_to_sql candidate sampling failed: %s", exc
+            ),
+        )
+        if best is None:
+            socket.send_data(
+                {"explanation": "Sorry, I couldn't generate any SQL candidates."}
+            )
+        else:
+            socket.send_data(best)
+        socket.close()
 
     @catch_error
     @with_ai_socket(command_type=AICommandType.SQL_TITLE)
